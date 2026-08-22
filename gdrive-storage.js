@@ -600,6 +600,10 @@ var GDriveDB = (function () {
       return { success: false };
     },
 
+    /* ── ACTIVITY (Drive mode builds from local data) ───────────────── */
+    async getRecentActivity(params) { return { activity: [] }; },
+    async getActivity(params)       { return { activity: [] }; },
+
     /* ── ADMIN / PERMISSIONS (no-op in Drive mode) ───────────────── */
     async getPendingRequests()  { return { requests: [] }; },
     async approveRequest()      { return { success: true }; },
