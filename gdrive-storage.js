@@ -263,13 +263,20 @@ var GDriveDB = (function () {
     /* ── BOXES ─────────────────────────────────────────────────── */
 
     async getAllBoxes() {
-      var rows = await sheetGet('Boxes!A2:F2000');
-      var boxes = rows.filter(function (r) { return r[0]; }).map(function (r) {
+      var [boxRows, itemRows] = await Promise.all([
+        sheetGet('Boxes!A2:F2000'),
+        sheetGet('Items!B2:B2000')
+      ]);
+      // count items per box name
+      var counts = {};
+      itemRows.forEach(function(r){ if(r[0]) counts[r[0]] = (counts[r[0]]||0) + 1; });
+      var boxes = boxRows.filter(function (r) { return r[0]; }).map(function (r) {
         return {
           name: r[0] || '', color: r[1] || '#f97316',
           location: r[2] || '',
           tags: (r[3] || '').split(',').filter(Boolean),
-          coverImage: r[4] || '', createdAt: r[5] || ''
+          coverImage: r[4] || '', createdAt: r[5] || '',
+          itemCount: counts[r[0]] || 0
         };
       });
       return { boxes: boxes };
@@ -680,7 +687,10 @@ var GDriveDB = (function () {
     async getUserBoxPerms()        { return { perms: {} }; },
     async assignBoxCoOwner()       { return { success: true }; },
     async removeBoxCoOwner()       { return { success: true }; },
-    async removeUser()             { return { success: true }; }
+    async removeUser()             { return { success: true }; },
+
+    /* ── SMART ADD / PHOTO ANALYSIS (Drive mode — no backend AI) ── */
+    async analyzePhoto()           { return { success: false, error: 'AI analysis not available in Drive mode — enter item details manually.' }; }
 
   }; // end return
 })();
