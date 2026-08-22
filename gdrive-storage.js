@@ -264,7 +264,7 @@ var GDriveDB = (function () {
 
     async getAllBoxes() {
       var rows = await sheetGet('Boxes!A2:F2000');
-      return rows.filter(function (r) { return r[0]; }).map(function (r) {
+      var boxes = rows.filter(function (r) { return r[0]; }).map(function (r) {
         return {
           name: r[0] || '', color: r[1] || '#f97316',
           location: r[2] || '',
@@ -272,6 +272,7 @@ var GDriveDB = (function () {
           coverImage: r[4] || '', createdAt: r[5] || ''
         };
       });
+      return { boxes: boxes };
     },
 
     async addBox(params) {
@@ -600,16 +601,86 @@ var GDriveDB = (function () {
       return { success: false };
     },
 
+    /* ── SEARCH ─────────────────────────────────────────────────── */
+    async searchAllBoxes(params) {
+      var q = (params.q || '').toLowerCase().trim();
+      if (!q) return { results: [] };
+      var rows = await sheetGet('Items!A2:K2000');
+      var results = rows
+        .filter(function(r) {
+          return r[0] && (
+            (r[2] || '').toLowerCase().indexOf(q) >= 0 ||
+            (r[3] || '').toLowerCase().indexOf(q) >= 0 ||
+            (r[4] || '').toLowerCase().indexOf(q) >= 0 ||
+            (r[1] || '').toLowerCase().indexOf(q) >= 0
+          );
+        })
+        .map(function(r) {
+          return {
+            id: r[0], box: r[1], name: r[2], desc: r[3] || '',
+            category: r[4] || '', qty: r[5] || '1'
+          };
+        });
+      return { results: results };
+    },
+
+    /* ── PHOTO COUNTS ───────────────────────────────────────────── */
+    async getBoxPhotoCounts(params) { return { counts: {} }; },
+
     /* ── ACTIVITY (Drive mode builds from local data) ───────────────── */
     async getRecentActivity(params) { return { activity: [] }; },
     async getActivity(params)       { return { activity: [] }; },
 
+    /* ── ACTION NAME ALIASES (UI uses Apps Script names) ────────── */
+    // deleteItem alias
+    async removeItem(params)      { return this.deleteItem(params); },
+    // markReturned alias
+    async returnItem(params)      { return this.markReturned(params); },
+    // getPhotos alias
+    async getItemPhotos(params)   { return this.getPhotos(params); },
+    // getGarageZone alias
+    async getGarageItems(params)  { return this.getGarageZone(params); },
+    // deleteGarageZoneItem alias
+    async removeGarageItem(params){ return this.deleteGarageZoneItem(params); },
+
+    // lendItem — update item's lending fields
+    async lendItem(params) {
+      return this.editItem({
+        id: params.id, lentTo: params.lentTo || '',
+        dueDate: params.dueDate || '', lentContact: params.lentContact || '',
+        lentNotes: params.lentNotes || ''
+      });
+    },
+
+    // moveItem — change an item's box
+    async moveItem(params) {
+      var rows = await sheetGet('Items!A2:K2000');
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i][0] === params.id) {
+          var r = rows[i]; r[1] = params.newBox;
+          await sheetUpdate('Items!A' + (i + 2), [r]);
+          return { success: true };
+        }
+      }
+      return { success: false, error: 'Item not found' };
+    },
+
     /* ── ADMIN / PERMISSIONS (no-op in Drive mode) ───────────────── */
-    async getPendingRequests()  { return { requests: [] }; },
-    async approveRequest()      { return { success: true }; },
-    async revokeAccess()        { return { success: true }; },
-    async getUsers()            { return { users: [] }; },
-    async requestAccess()       { return { success: true }; }
+    async getPendingRequests()     { return { requests: [] }; },
+    async approveRequest()         { return { success: true }; },
+    async revokeAccess()           { return { success: true }; },
+    async getUsers()               { return { users: [] }; },
+    async requestAccess()          { return { success: true }; },
+    async getMyBoxPerms()          { return { perms: {} }; },
+    async submitAccessRequest()    { return { success: true }; },
+    async approveUser()            { return { success: true }; },
+    async denyUser()               { return { success: true }; },
+    async sendLendReminder()       { return { success: true }; },
+    async getApprovedUsers()       { return { users: [] }; },
+    async getUserBoxPerms()        { return { perms: {} }; },
+    async assignBoxCoOwner()       { return { success: true }; },
+    async removeBoxCoOwner()       { return { success: true }; },
+    async removeUser()             { return { success: true }; }
 
   }; // end return
 })();
