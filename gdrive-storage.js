@@ -765,29 +765,415 @@ var GDriveDB = (function () {
    Status: PLANNED — scaffold only.
 */
 var OneDriveDB = (function () {
+
+  /* ── internals ──────────────────────────────────────────────── */
   var _token  = null;
-  var GRAPH   = 'https://graph.microsoft.com/v1.0';
+  var _email  = null;
+  var _db     = null;   // full in-memory DB cache
+
+  var GRAPH    = 'https://graph.microsoft.com/v1.0';
   var APP_PATH = '/me/drive/special/approot:/GarageOrganizer';
 
-  return {
-    init: async function (accessToken, email) {
-      _token = accessToken;
-      localStorage.setItem('onedrive_token',     _token);
+  function hdr()  { return { 'Authorization': 'Bearer ' + _token }; }
+  function jhdr() { return { 'Authorization': 'Bearer ' + _token, 'Content-Type': 'application/json' }; }
+
+  function _uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+  function _checkExpiry(status) {
+    if (status === 401) {
+      localStorage.removeItem('onedrive_token');
+      if (typeof window !== 'undefined' && window.dispatchEvent)
+        window.dispatchEvent(new CustomEvent('onedrive_token_expired'));
+      throw new Error('TOKEN_EXPIRED');
+    }
+  }
+
+  /* ── JSON database file ─────────────────────────────────────── */
+  function emptyDb() {
+    return { boxes: [], items: [], photos: [], garageZone: [], config: {} };
+  }
+
+  async function loadDb() {
+    if (_db) return _db;
+    var r = await fetch(GRAPH + APP_PATH + '/garage_db.json:/content', { headers: hdr() });
+    if (r.status === 404) { _db = emptyDb(); await saveDb(); return _db; }
+    _checkExpiry(r.status);
+    if (!r.ok) throw new Error('OneDrive read failed: ' + r.status);
+    _db = await r.json();
+    _db.boxes      = _db.boxes      || [];
+    _db.items      = _db.items      || [];
+    _db.photos     = _db.photos     || [];
+    _db.garageZone = _db.garageZone || [];
+    _db.config     = _db.config     || {};
+    return _db;
+  }
+
+  async function saveDb() {
+    var r = await fetch(
+      GRAPH + APP_PATH + '/garage_db.json:/content',
+      { method: 'PUT', headers: jhdr(), body: JSON.stringify(_db) }
+    );
+    _checkExpiry(r.status);
+    if (!r.ok) throw new Error('OneDrive save failed: ' + r.status);
+  }
+
+  /* ── Photo file helpers ─────────────────────────────────────── */
+  async function uploadFile(b64, mime, folder, fileName) {
+    var clean = folder.replace(/[^a-zA-Z0-9_-]/g, '_');
+    var path  = GRAPH + APP_PATH + '/Photos/' + clean + '/' + fileName + ':/content';
+    var raw   = atob(b64.replace(/^data:[^;]+;base64,/, ''));
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    var r = await fetch(path, {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + _token, 'Content-Type': mime || 'image/jpeg' },
+      body: bytes
+    });
+    _checkExpiry(r.status);
+    if (!r.ok) throw new Error('Photo upload failed: ' + r.status);
+    return await r.json();  // { id, name, ... }
+  }
+
+  async function getDownloadUrl(fileId) {
+    var r = await fetch(
+      GRAPH + '/me/drive/items/' + fileId + '?select=@microsoft.graph.downloadUrl',
+      { headers: hdr() }
+    );
+    if (!r.ok) return null;
+    var d = await r.json();
+    return d['@microsoft.graph.downloadUrl'] || null;
+  }
+
+  /* ── Public surface (mirrors GDriveDB) ──────────────────────── */
+  var db = {
+
+    init: async function (token, email) {
+      _token = token;
+      _email = email;
+      _db    = null;
+      localStorage.setItem('onedrive_token',     token);
       localStorage.setItem('onedrive_token_exp', String(Date.now() + 3500 * 1000));
       localStorage.setItem('onedrive_email',     email || '');
-      // Phase 2: create /Apps/GarageOrganizer/garage_db.xlsx if not present
-      console.log('[OneDriveDB] Phase 2 — not yet implemented');
-      return { success: false, message: 'OneDrive support coming soon' };
+      await loadDb();
+      return { success: true };
     },
+
     restore: function () {
       _token = localStorage.getItem('onedrive_token') || '';
       var exp = parseInt(localStorage.getItem('onedrive_token_exp') || '0', 10);
+      _email = localStorage.getItem('onedrive_email') || '';
+      _db = null;
       return !!(_token && Date.now() < exp);
     },
+
     clear: function () {
-      ['onedrive_token','onedrive_token_exp','onedrive_email'].forEach(function (k) { localStorage.removeItem(k); });
-      _token = null;
+      ['onedrive_token','onedrive_token_exp','onedrive_email'].forEach(function (k) {
+        localStorage.removeItem(k);
+      });
+      _token = null; _email = null; _db = null;
     },
-    checkAccess: async function () { return { access: 'admin' }; }
-  };
+
+    checkAccess: async function () { return { access: 'admin' }; },
+
+    /* ── Boxes ─────────────────────────────────────────────────── */
+
+    getAllBoxes: async function () {
+      var d = await loadDb();
+      return { boxes: d.boxes };
+    },
+
+    addBox: async function (p) {
+      var d = await loadDb();
+      var name = (p.name || '').trim();
+      if (!name) return { success: false, error: 'Box name required' };
+      if (d.boxes.find(function (b) { return b.name === name; }))
+        return { success: false, error: 'Box already exists' };
+      var box = { name: name, color: p.color||'', location: p.location||'', tags: p.tags||'', coverImage: '', createdAt: new Date().toISOString() };
+      d.boxes.push(box);
+      await saveDb();
+      return { success: true, box: box };
+    },
+
+    deleteBox: async function (p) {
+      var d = await loadDb();
+      var name = p.name || p.box || '';
+      d.boxes      = d.boxes.filter(function (b) { return b.name !== name; });
+      d.items      = d.items.filter(function (i) { return i.box  !== name; });
+      d.photos     = d.photos.filter(function (x) { return x.box !== name; });
+      await saveDb();
+      return { success: true };
+    },
+
+    renameBox: async function (p) {
+      var d = await loadDb();
+      var oldName = p.oldName || p.name || '';
+      var newName = (p.newName || '').trim();
+      if (!newName) return { success: false, error: 'New name required' };
+      var box = d.boxes.find(function (b) { return b.name === oldName; });
+      if (!box) return { success: false, error: 'Box not found' };
+      box.name = newName;
+      d.items.forEach(function (i)  { if (i.box === oldName) i.box = newName; });
+      d.photos.forEach(function (x) { if (x.box === oldName) x.box = newName; });
+      await saveDb();
+      return { success: true };
+    },
+
+    setBoxColor: async function (p) {
+      var d = await loadDb();
+      var box = d.boxes.find(function (b) { return b.name === (p.name||p.box); });
+      if (box) box.color = p.color || '';
+      await saveDb();
+      return { success: true };
+    },
+
+    setBoxImage: async function (p) {
+      var d = await loadDb();
+      var box = d.boxes.find(function (b) { return b.name === (p.box||p.name); });
+      if (box && p.imageUrl) box.coverImage = p.imageUrl;
+      await saveDb();
+      return { success: true };
+    },
+
+    getBoxContents: async function (p) {
+      var d = await loadDb();
+      return { items: d.items.filter(function (i) { return i.box === (p.box||p.name||''); }) };
+    },
+
+    getBoxImages: async function (p) {
+      var d = await loadDb();
+      return { photos: d.photos.filter(function (x) { return x.box === (p.box||''); }) };
+    },
+
+    getBoxPhotoCounts: async function () {
+      var d = await loadDb();
+      var counts = {};
+      d.photos.forEach(function (x) { counts[x.box] = (counts[x.box]||0) + 1; });
+      return { counts: counts };
+    },
+
+    getBoxTags: async function (p) {
+      var d = await loadDb();
+      var box = d.boxes.find(function (b) { return b.name === (p.box||p.name); });
+      return { tags: box ? (box.tags||'') : '' };
+    },
+
+    setBoxTags: async function (p) {
+      var d = await loadDb();
+      var box = d.boxes.find(function (b) { return b.name === (p.box||p.name); });
+      if (box) box.tags = p.tags || '';
+      await saveDb();
+      return { success: true };
+    },
+
+    recoverOrphanBoxes: async function () { return { success: true }; },
+
+    /* ── Items ─────────────────────────────────────────────────── */
+
+    addItem: async function (p) {
+      var d = await loadDb();
+      var item = {
+        id: _uid(), box: p.box||'', name: p.name||'',
+        desc: p.desc||p.description||'', category: p.category||'',
+        qty: p.qty||p.quantity||'1', dateAdded: new Date().toISOString(),
+        lentTo: '', dueDate: '', lentContact: '', lentNotes: ''
+      };
+      d.items.push(item);
+      await saveDb();
+      return { success: true, id: item.id };
+    },
+
+    editItem: async function (p) {
+      var d = await loadDb();
+      var item = d.items.find(function (i) { return i.id === p.id; });
+      if (!item) return { success: false, error: 'Item not found' };
+      var fields = ['name','desc','category','qty','lentTo','dueDate','lentContact','lentNotes'];
+      fields.forEach(function (k) { if (p[k] !== undefined) item[k] = p[k]; });
+      if (p.description !== undefined) item.desc = p.description;
+      if (p.quantity    !== undefined) item.qty  = p.quantity;
+      await saveDb();
+      return { success: true };
+    },
+
+    deleteItem: async function (p) {
+      var d = await loadDb();
+      d.items  = d.items.filter(function (i) { return i.id !== p.id; });
+      d.photos = d.photos.filter(function (x) { return x.itemId !== p.id; });
+      await saveDb();
+      return { success: true };
+    },
+
+    removeItem: async function (p) { return db.deleteItem(p); },
+
+    markReturned: async function (p) {
+      return db.editItem(Object.assign({}, p, { lentTo:'', dueDate:'', lentContact:'', lentNotes:'' }));
+    },
+    returnItem: async function (p) { return db.markReturned(p); },
+    lendItem:   async function (p) { return db.editItem(p); },
+
+    moveItem: async function (p) {
+      var d = await loadDb();
+      var item = d.items.find(function (i) { return i.id === p.id; });
+      if (item && p.toBox) item.box = p.toBox;
+      await saveDb();
+      return { success: true };
+    },
+
+    getAllItems: async function () {
+      var d = await loadDb();
+      return { items: d.items };
+    },
+
+    getLentItems: async function () {
+      var d = await loadDb();
+      return { items: d.items.filter(function (i) { return !!i.lentTo; }) };
+    },
+
+    /* ── Photos ─────────────────────────────────────────────────── */
+
+    uploadPhoto: async function (p) {
+      try {
+        var b64     = p.imageData || p.image || '';
+        var mime    = p.mimeType || 'image/jpeg';
+        var box     = p.box || 'General';
+        var itemId  = p.itemId || '';
+        var fname   = _uid() + '.jpg';
+        var meta    = await uploadFile(b64, mime, box, fname);
+        var d       = await loadDb();
+        var photo   = { id: _uid(), box: box, itemId: itemId, itemName: p.itemName||'', fileId: meta.id, dateAdded: new Date().toISOString() };
+        d.photos.push(photo);
+        var bx = d.boxes.find(function (b) { return b.name === box; });
+        if (bx && !bx.coverImage) bx.coverImage = meta.id;
+        await saveDb();
+        return { success: true, photoId: photo.id, fileId: meta.id };
+      } catch(e) { return { success: false, error: e.message }; }
+    },
+
+    getPhotos: async function (p) {
+      var d    = await loadDb();
+      var list = d.photos;
+      if (p && p.box)    list = list.filter(function (x) { return x.box    === p.box; });
+      if (p && p.itemId) list = list.filter(function (x) { return x.itemId === p.itemId; });
+      var enriched = await Promise.all(list.map(async function (x) {
+        var url = x.fileId ? await getDownloadUrl(x.fileId) : null;
+        return Object.assign({}, x, { url: url });
+      }));
+      return { photos: enriched };
+    },
+
+    getItemPhotos: async function (p) { return db.getPhotos(p); },
+
+    deletePhoto: async function (p) {
+      var d = await loadDb();
+      var ph = d.photos.find(function (x) { return x.id === p.id || x.fileId === p.fileId; });
+      if (ph && ph.fileId) {
+        fetch(GRAPH + '/me/drive/items/' + ph.fileId, { method: 'DELETE', headers: hdr() }).catch(function(){});
+      }
+      d.photos = d.photos.filter(function (x) { return x.id !== p.id; });
+      await saveDb();
+      return { success: true };
+    },
+
+    /* ── Garage Zone ────────────────────────────────────────────── */
+
+    getGarageZone:  async function () { var d = await loadDb(); return { items: d.garageZone }; },
+    getGarageItems: async function () { return db.getGarageZone(); },
+
+    addGarageZoneItem: async function (p) {
+      var d = await loadDb();
+      var item = { id: _uid(), name: p.name||'', desc: p.desc||p.description||'', category: p.category||'', location: p.location||'', qty: p.qty||'1', dateAdded: new Date().toISOString() };
+      d.garageZone.push(item);
+      await saveDb();
+      return { success: true, id: item.id };
+    },
+    addGarageItem:      async function (p) { return db.addGarageZoneItem(p); },
+
+    editGarageZoneItem: async function (p) {
+      var d = await loadDb();
+      var item = d.garageZone.find(function (i) { return i.id === p.id; });
+      if (!item) return { success: false, error: 'Item not found' };
+      ['name','desc','category','location','qty'].forEach(function (k) { if (p[k] !== undefined) item[k] = p[k]; });
+      if (p.description !== undefined) item.desc = p.description;
+      await saveDb();
+      return { success: true };
+    },
+    editGarageItem:     async function (p) { return db.editGarageZoneItem(p); },
+
+    deleteGarageZoneItem: async function (p) {
+      var d = await loadDb();
+      d.garageZone = d.garageZone.filter(function (i) { return i.id !== p.id; });
+      await saveDb();
+      return { success: true };
+    },
+    removeGarageItem: async function (p) { return db.deleteGarageZoneItem(p); },
+
+    /* ── Search ──────────────────────────────────────────────────── */
+
+    searchAllBoxes: async function (p) {
+      var d = await loadDb();
+      var q = ((p && p.q) || (p && p.query) || '').toLowerCase();
+      if (!q) return { results: [] };
+      return {
+        results: d.items
+          .filter(function (i) { return (i.name+' '+i.desc+' '+i.category+' '+i.box).toLowerCase().includes(q); })
+          .map(function (i) { return { itemName: i.name, boxName: i.box, desc: i.desc, category: i.category, qty: i.qty }; })
+      };
+    },
+
+    /* ── Config ──────────────────────────────────────────────────── */
+
+    getConfig: async function (p) {
+      var d = await loadDb();
+      if (p && p.key) return { value: d.config[p.key] || null };
+      return { config: d.config };
+    },
+
+    setConfig: async function (p) {
+      var d = await loadDb();
+      if (p && p.key) d.config[p.key] = p.value;
+      await saveDb();
+      return { success: true };
+    },
+
+    /* ── Activity ────────────────────────────────────────────────── */
+    getRecentActivity: async function () { return { activity: [] }; },
+    getActivity:       async function () { return { activity: [] }; },
+
+    /* ── Multi-user stubs (OneDrive is always single-user/admin) ─── */
+    getPendingRequests:  async function () { return { requests: [] }; },
+    approveRequest:      async function () { return { success: true }; },
+    revokeAccess:        async function () { return { success: true }; },
+    getUsers:            async function () { return { users: [] }; },
+    getApprovedUsers:    async function () { return { users: [] }; },
+    requestAccess:       async function () { return { success: true }; },
+    submitAccessRequest: async function () { return { success: true }; },
+    getMyBoxPerms:       async function () { return { perms: [] }; },
+    getUserBoxPerms:     async function () { return { perms: [] }; },
+    approveUser:         async function () { return { success: true }; },
+    denyUser:            async function () { return { success: true }; },
+    assignBoxCoOwner:    async function () { return { success: true }; },
+    removeBoxCoOwner:    async function () { return { success: true }; },
+    removeUser:          async function () { return { success: true }; },
+    sendLendReminder:    async function () { return { success: true }; },
+
+    /* ── Smart Add (same Gemini proxy as GDriveDB) ───────────────── */
+    analyzePhoto: async function (params) {
+      try {
+        var mime = params.mimeType || 'image/jpeg';
+        var GEMINI_PROXY = 'https://garage-organizer-voice.vercel.app/api/gemini';
+        var r = await fetch(GEMINI_PROXY, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ image: params.image, mimeType: mime })
+        });
+        if(!r.ok) throw new Error('Gemini proxy error ' + r.status);
+        var parsed = await r.json();
+        if(parsed.error) throw new Error(parsed.error);
+        return { success:true, name:parsed.name||'', desc:parsed.desc||'', category:parsed.category||'' };
+      } catch(e) {
+        return { success:false, error:'Could not analyze photo: '+(e.message||e) };
+      }
+    }
+
+  }; // end db object
+
+  return db;
 })();
