@@ -43,9 +43,22 @@ var GDriveDB = (function () {
   function auth() { return { 'Authorization': 'Bearer ' + _token }; }
   function json() { return { 'Authorization': 'Bearer ' + _token, 'Content-Type': 'application/json' }; }
 
+  /* ── token expiry sentinel ───────────────────────────────────── */
+  function _checkExpiry(status) {
+    if(status === 401) {
+      // Token expired — clear and signal app to re-auth
+      localStorage.removeItem('gdrive_token');
+      localStorage.removeItem('gdrive_token_exp');
+      if(typeof window !== 'undefined' && window.dispatchEvent)
+        window.dispatchEvent(new CustomEvent('gdrive_token_expired'));
+      throw new Error('TOKEN_EXPIRED');
+    }
+  }
+
   /* ── low-level Sheets helpers ───────────────────────────────── */
   async function sheetGet(range) {
     var r = await fetch(SHEETS + '/' + _sheetId + '/values/' + encodeURIComponent(range), { headers: auth() });
+    _checkExpiry(r.status);
     var d = await r.json();
     if (!r.ok) throw new Error(d.error && d.error.message || 'Sheets read failed');
     return d.values || [];
@@ -518,7 +531,9 @@ var GDriveDB = (function () {
     async getGarageZone(params) {
       var rows = await sheetGet('GarageZone!A2:G2000');
       var items = rows.filter(function (r) { return r[0]; }).map(function (r) {
-        return { id: r[0], name: r[1], desc: r[2] || '', category: r[3] || '',
+        // return both 'cat' and 'category' so any UI variant works
+        return { id: r[0], name: r[1], desc: r[2] || '',
+                 cat: r[3] || '', category: r[3] || '',
                  location: r[4] || '', qty: r[5] || '1', dateAdded: r[6] || '' };
       });
       return { items: items };
@@ -526,24 +541,30 @@ var GDriveDB = (function () {
 
     async addGarageZoneItem(params) {
       var id = _uid('gz');
+      var cat = params.cat || params.category || '';
       await sheetAppend('GarageZone', [
-        id, params.name, params.desc || '', params.category || '',
+        id, params.name, params.desc || '', cat,
         params.location || '', params.qty || '1',
         new Date().toISOString().slice(0, 10)
       ]);
       return { success: true, id: id };
     },
 
+    // UI calls addGarageItem / editGarageItem (Apps Script naming)
+    async addGarageItem(params)  { return this.addGarageZoneItem(params); },
+    async editGarageItem(params) { return this.editGarageZoneItem(Object.assign({}, params, {id: params.itemId || params.id})); },
+
     async editGarageZoneItem(params) {
       var rows = await sheetGet('GarageZone!A2:G2000');
       for (var i = 0; i < rows.length; i++) {
-        if (rows[i][0] === params.id) {
+        if (rows[i][0] === (params.id || params.itemId)) {
           var r = rows[i];
+          var cat = params.cat !== undefined ? params.cat : (params.category !== undefined ? params.category : r[3]);
           await sheetUpdate('GarageZone!A' + (i + 2), [[
             r[0],
             params.name     !== undefined ? params.name     : r[1],
             params.desc     !== undefined ? params.desc     : r[2],
-            params.category !== undefined ? params.category : r[3],
+            cat,
             params.location !== undefined ? params.location : r[4],
             params.qty      !== undefined ? params.qty      : r[5],
             r[6]
@@ -606,6 +627,27 @@ var GDriveDB = (function () {
         }
       }
       return { success: false };
+    },
+
+    /* ── BOX RECOVERY (backfill boxes missing from Boxes tab) ───── */
+    async recoverOrphanBoxes() {
+      var [boxRows, itemRows] = await Promise.all([
+        sheetGet('Boxes!A2:A2000'),
+        sheetGet('Items!B2:B2000')
+      ]);
+      var existing = new Set(boxRows.map(function(r){ return r[0]; }).filter(Boolean));
+      var seen = new Set();
+      var toAdd = [];
+      itemRows.forEach(function(r){
+        var name = r[0];
+        if(name && !existing.has(name) && !seen.has(name)){
+          seen.add(name); toAdd.push(name);
+        }
+      });
+      for(var i=0; i<toAdd.length; i++){
+        await sheetAppend('Boxes',[toAdd[i],'#f97316','','','',new Date().toISOString()]);
+      }
+      return { recovered: toAdd.length, boxes: toAdd };
     },
 
     /* ── SEARCH ─────────────────────────────────────────────────── */
@@ -689,8 +731,26 @@ var GDriveDB = (function () {
     async removeBoxCoOwner()       { return { success: true }; },
     async removeUser()             { return { success: true }; },
 
-    /* ── SMART ADD / PHOTO ANALYSIS (Drive mode — no backend AI) ── */
-    async analyzePhoto()           { return { success: false, error: 'AI analysis not available in Drive mode — enter item details manually.' }; }
+    /* ── SMART ADD / PHOTO ANALYSIS (Gemini Vision via Drive token) ── */
+    async analyzePhoto(params) {
+      try {
+        var b64 = (params.image||'').replace(/^data:[^;]+;base64,/,'');
+        var mime = params.mimeType || 'image/jpeg';
+        // Use Gemini 1.5 Flash (free, fast) with the user's OAuth token
+        // Key is server-side only — call the Vercel proxy instead of Gemini directly
+        var GEMINI_PROXY = 'https://garage-organizer-voice.vercel.app/api/gemini';
+        var r = await fetch(GEMINI_PROXY, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ image: params.image, mimeType: mime })
+        });
+        if(!r.ok) throw new Error('Gemini proxy error ' + r.status);
+        var parsed = await r.json();
+        if(parsed.error) throw new Error(parsed.error);
+        return { success:true, name:parsed.name||'', desc:parsed.desc||'', category:parsed.category||'' };
+      } catch(e) {
+        return { success:false, error:'Could not analyze photo: '+(e.message||e) };
+      }
+    }
 
   }; // end return
 })();
