@@ -1373,6 +1373,23 @@
     .bnav-tab.active{color:var(--accent)}
     .bnav-tab-icon{font-size:1.3rem;line-height:1;display:block}
     body.bnav-pad #app{padding-bottom:72px!important}
+    /* ── Mobile visual refresh ───────────────────────────────────── */
+    @media(max-width:640px){
+      .box-grid{grid-template-columns:1fr 1fr!important;gap:8px!important}
+      .box-card{padding:12px!important;gap:8px!important}
+      .box-ico{width:36px!important;height:36px!important;font-size:1rem!important;border-radius:8px!important}
+      .box-name{font-size:.82rem!important}
+      .box-id{display:none!important}
+      .box-cnt{font-size:.7rem!important}
+      .box-card-btns{gap:4px!important}
+      .btn-qr{min-width:44px!important;padding:0 6px!important}
+      .box-card-btns .gai-btn{padding:0 10px!important;font-size:.72rem!important;height:34px!important}
+      .dash-hero-title,.dash-hero-sub{display:none!important}
+      .dash-hero-badge{display:none!important}
+      .dash-hero{padding:6px 0 2px!important}
+      .i-text,.search-input,select,textarea{font-size:16px!important}
+      .search-hero{margin-bottom:8px!important}
+    }
   </style>
   <!-- Firebase Analytics (async so they never block app startup) -->
   <script async src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -1514,7 +1531,7 @@ function setTab(tab){
   setNavActive(tab);
   var params=new URLSearchParams(location.search),onSub=params.get('box')||params.get('zone');
   if(tab==='home'){if(onSub){window.location.href=location.origin+location.pathname;}else{loadDash();}}
-  else if(tab==='items'){$('btn-back').classList.add('hidden');setHdr('Items');renderSrch($('app'));}
+  else if(tab==='items'){$('btn-back').classList.add('hidden');renderItemsTab();}
   else if(tab==='boxes'){$('btn-back').classList.add('hidden');renderBoxesTab();}
   else if(tab==='locations'){window.location.href='?zone=garage';}
   else if(tab==='settings'){$('btn-back').classList.add('hidden');renderSettingsTab();}
@@ -1564,6 +1581,59 @@ function renderSettingsTab(){
     +'</div>';
 }
 function toggleDark(on){document.documentElement.classList.toggle('dark',on);localStorage.setItem('theme',on?'dark':'light');if(ACTIVE_TAB==='settings')renderSettingsTab();}
+
+function renderItemsTab(){
+  setHdr('Items');
+  var boxes=S.allBoxes||[];
+  var opts=boxes.map(function(b){return'<option value="'+esc(b.name)+'">'+esc(b.name.replace(/_/g,' '))+'</option>';}).join('');
+  $('app').innerHTML=
+    '<div style="padding:12px 16px">'
+    +'<div class="box-card" style="padding:16px;margin-bottom:12px">'
+    +'<div style="font-size:.72rem;font-weight:700;color:var(--text-muted);margin-bottom:10px;letter-spacing:.5px;text-transform:uppercase">Add Item</div>'
+    +'<input type="text" id="qi-name" class="i-text" placeholder="Item name..." style="margin-bottom:8px;font-size:16px" />'
+    +(opts
+      ?'<select id="qi-box" class="i-text" style="margin-bottom:10px;font-size:16px"><option value="">Choose a box...</option>'+opts+'</select>'
+      :'<p style="font-size:.8rem;color:var(--text-muted);margin:0 0 10px">No boxes yet — add one from Home.</p>')
+    +'<button id="qi-btn" class="i-submit" onclick="doQuickAddItem()">Add Item</button>'
+    +'<div id="qi-st" style="margin-top:8px;font-size:.8rem;min-height:1.2em"></div>'
+    +'</div>'
+    +'<div class="box-card" style="padding:16px">'
+    +'<div style="font-size:.72rem;font-weight:700;color:var(--text-muted);margin-bottom:10px;letter-spacing:.5px;text-transform:uppercase">Search All Boxes</div>'
+    +'<div class="search-box"><input type="text" id="sq" class="search-input" placeholder="Search items..." autocomplete="off" style="font-size:16px"><button class="search-submit" onclick="doFullSrch()">Search</button></div>'
+    +'<div id="so" style="margin-top:12px"></div>'
+    +'</div></div>';
+  var inp=$('sq');
+  inp.addEventListener('keydown',function(e){if('Enter'===e.key)doFullSrch();});
+  inp.addEventListener('input',function(){
+    var q=inp.value.trim();
+    clearTimeout(_srchTimer);
+    if(!q){$('so').innerHTML='';return;}
+    if(q.length<2)return;
+    $('so').innerHTML='<div class="spin-w" style="padding:14px"><div class="spin" style="width:20px;height:20px;border-width:2px"></div></div>';
+    _srchTimer=setTimeout(function(){
+      _srchCache[q]?renderBoxSrchResults(q,_srchCache[q]):api('searchAllBoxes',{q:q}).then(function(r){_srchCache[q]=r&&r.results||[];renderBoxSrchResults(q,_srchCache[q]);}).catch(function(){$('so').innerHTML='<div class="empty"><div class="empty-sub">Search failed.</div></div>';});
+    },280);
+  });
+}
+function doQuickAddItem(){
+  var name=($('qi-name').value||'').trim();
+  var boxEl=$('qi-box'),box=boxEl?boxEl.value:'';
+  var btn=$('qi-btn'),st=$('qi-st');
+  if(!name){st.innerHTML='<span style="color:var(--err)">Enter an item name.</span>';return;}
+  if(!box){st.innerHTML='<span style="color:var(--err)">Choose a box.</span>';return;}
+  btn.disabled=true;btn.textContent='Adding...';
+  api('addItem',{box:box,name:name,desc:'',cat:'',qty:'',email:U?U.email:''}).then(function(r){
+    if(r&&r.success){
+      st.innerHTML='<span style="color:var(--ok,#22c55e)">&#10003; Added to '+esc(box.replace(/_/g,' '))+'</span>';
+      $('qi-name').value='';
+      S.allBoxes=S.allBoxes.map(function(b){return b.name===box?Object.assign({},b,{itemCount:(b.itemCount||0)+1}):b;});
+    }else{st.innerHTML='<span style="color:var(--err)">Failed. Try again.</span>';}
+    btn.disabled=false;btn.textContent='Add Item';
+  }).catch(function(){
+    st.innerHTML='<span style="color:var(--err)">Network error.</span>';
+    btn.disabled=false;btn.textContent='Add Item';
+  });
+}
 window.addEventListener("gdrive_token_expired",function(){STORAGE_MODE="appsscript",localStorage.removeItem("storage_mode"),U=null,clearSession(),showAuthScreen("Your session expired. Please reconnect with Google Drive.")}),function(){var sess;(function(){var sess,ok=!1;"gdrive"===STORAGE_MODE&&"undefined"!=typeof GDriveDB&&GDriveDB.restore()?(sess=loadSession(),ok=!!(sess&&sess.email)):"onedrive"===STORAGE_MODE&&"undefined"!=typeof OneDriveDB&&OneDriveDB.restore()?(sess=loadSession(),ok=!!(sess&&sess.email)):(sess=loadSession(),ok=!!(sess&&sess.email&&"appsscript"===STORAGE_MODE));ok?(U=sess,setHdrUser(),bootApp()):(typeof _handleMsRedirect==="function"&&_handleMsRedirect(),showAuthScreen())
 })()}();</script>
 
