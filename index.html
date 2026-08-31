@@ -1539,9 +1539,14 @@ function setTab(tab){
 function renderBoxesTab(){
   setHdr('Boxes');
   var boxes=S.allBoxes||[];
-  if(!boxes.length){$('app').innerHTML='<div style="padding:32px;text-align:center;color:var(--text-muted)">No boxes yet. Go to Home to add your first box.</div>';return;}
+  if(!boxes.length){
+    $('app').innerHTML='<div class="spin-w"><div class="spin"></div></div>';
+    api('getAllBoxes').then(function(r){S.allBoxes=r.boxes||[];renderBoxesTab();}).catch(function(){$('app').innerHTML='<div style="padding:32px;text-align:center;color:var(--text-muted)">Could not load boxes.</div>';});
+    return;
+  }
+  var _cm=typeof colorMap!=='undefined'?colorMap:{};
   var html='<div style="padding:16px"><div class="box-grid">'+boxes.map(function(b){
-    var col=colorMap[b.name]||getBoxColor(b.name);
+    var col=_cm[b.name]||getBoxColor(b.name);
     return '<div class="box-card" onclick="openBox(\''+esc(b.name)+'\')" style="border-top:3px solid '+col+'"><div class="box-card-name" style="color:var(--text)">'+esc(b.name)+'</div><div class="box-card-sub">'+(b.itemCount||0)+' item'+(b.itemCount===1?'':'s')+'</div></div>';
   }).join('')+'</div></div>';
   $('app').innerHTML=html;
