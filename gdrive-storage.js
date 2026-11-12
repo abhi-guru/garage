@@ -216,6 +216,29 @@ var GDriveDB = (function () {
     return new Blob([ab], { type: mime || 'image/jpeg' });
   }
 
+  /* ── photo links in the shape the photo screens read (same as the Apps Script) ── */
+  function _photoLinks(fileId) {
+    return {
+      fileId:   fileId,
+      thumbUrl: 'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w400-h400-c',
+      viewUrl:  'https://drive.google.com/file/d/' + fileId + '/view'
+    };
+  }
+
+  /* The app's WebView cannot load drive.google.com image links (no Google cookies there), so
+     read the picture with the user's token and hand the screen a local blob: URL instead. */
+  var _photoBlobUrls = {};
+  async function _photoBlobUrl(fileId) {
+    if (_photoBlobUrls[fileId]) return _photoBlobUrls[fileId];
+    try {
+      var r = await fetch(DRIVE + '/' + encodeURIComponent(fileId) + '?alt=media', { headers: auth() });
+      if (!r.ok) return null;
+      var url = URL.createObjectURL(await r.blob());
+      _photoBlobUrls[fileId] = url;
+      return url;
+    } catch (e) { return null; }
+  }
+
   /* ── uid generator ──────────────────────────────────────────── */
   function _uid(prefix) {
     return (prefix || 'id') + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
@@ -496,25 +519,31 @@ var GDriveDB = (function () {
         photoId, params.box, params.itemId || '', params.itemName || '',
         url, f.id, new Date().toISOString().slice(0, 10)
       ]);
-      return { success: true, url: url, id: photoId };
+      return Object.assign({ success: true, url: url, id: photoId, fileName: fname }, _photoLinks(f.id));
     },
 
     async getPhotos(params) {
       var rows = await sheetGet('Photos!A2:G2000');
-      var photos = rows
+      var photos = await Promise.all(rows
         .filter(function (r) {
           return r[1] === params.box && (!params.itemId || r[2] === params.itemId);
         })
-        .map(function (r) {
-          return { id: r[0], box: r[1], itemId: r[2], itemName: r[3], url: r[4], driveFileId: r[5], dateAdded: r[6] };
-        });
+        .map(async function (r) {
+          var p = Object.assign(
+            { id: r[0], box: r[1], itemId: r[2], itemName: r[3], url: r[4], driveFileId: r[5], dateAdded: r[6],
+              fileName: r[3] || '', uploadedAt: r[6] || '' },
+            _photoLinks(r[5]));
+          var local = r[5] ? await _photoBlobUrl(r[5]) : null;
+          if (local) { p.thumbUrl = local; p.viewUrl = local; }
+          return p;
+        }));
       return { photos: photos };
     },
 
     async deletePhoto(params) {
       var rows = await sheetGet('Photos!A2:F2000');
       for (var i = 0; i < rows.length; i++) {
-        if (rows[i][0] === params.id) {
+        if ((params.id && rows[i][0] === params.id) || (params.fileId && rows[i][5] === params.fileId)) {
           await sheetDeleteRow('Photos', i);
           /* optionally delete the Drive file too */
           if (rows[i][5]) {
@@ -674,7 +703,14 @@ var GDriveDB = (function () {
     },
 
     /* ── PHOTO COUNTS ───────────────────────────────────────────── */
-    async getBoxPhotoCounts(params) { return { counts: {} }; },
+    async getBoxPhotoCounts(params) {
+      var rows = await sheetGet('Photos!A2:G2000');
+      var counts = {};
+      rows.forEach(function (r) {
+        if (r[1] === (params && params.box) && r[2]) counts[r[2]] = (counts[r[2]] || 0) + 1;
+      });
+      return { counts: counts };
+    },
 
     /* ── ACTIVITY (Drive mode builds from local data) ───────────────── */
     async getRecentActivity(params) { return { activity: [] }; },
@@ -947,7 +983,7 @@ var OneDriveDB = (function () {
     getBoxPhotoCounts: async function () {
       var d = await loadDb();
       var counts = {};
-      d.photos.forEach(function (x) { counts[x.box] = (counts[x.box]||0) + 1; });
+      d.photos.forEach(function (x) { if (x.itemId) counts[x.itemId] = (counts[x.itemId]||0) + 1; });
       return { counts: counts };
     },
 
@@ -1032,7 +1068,7 @@ var OneDriveDB = (function () {
 
     uploadPhoto: async function (p) {
       try {
-        var b64     = p.imageData || p.image || '';
+        var b64     = p.imageData || p.image || p.base64 || '';
         var mime    = p.mimeType || 'image/jpeg';
         var box     = p.box || 'General';
         var itemId  = p.itemId || '';
@@ -1055,7 +1091,7 @@ var OneDriveDB = (function () {
       if (p && p.itemId) list = list.filter(function (x) { return x.itemId === p.itemId; });
       var enriched = await Promise.all(list.map(async function (x) {
         var url = x.fileId ? await getDownloadUrl(x.fileId) : null;
-        return Object.assign({}, x, { url: url });
+        return Object.assign({ fileName: x.itemName || '', uploadedAt: x.dateAdded || '' }, x, { url: url, thumbUrl: url, viewUrl: url });
       }));
       return { photos: enriched };
     },
@@ -1068,7 +1104,7 @@ var OneDriveDB = (function () {
       if (ph && ph.fileId) {
         fetch(GRAPH + '/me/drive/items/' + ph.fileId, { method: 'DELETE', headers: hdr() }).catch(function(){});
       }
-      d.photos = d.photos.filter(function (x) { return x.id !== p.id; });
+      d.photos = d.photos.filter(function (x) { return x !== ph; });
       await saveDb();
       return { success: true };
     },
