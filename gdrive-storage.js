@@ -134,12 +134,21 @@ var GDriveDB = (function () {
     return d;
   }
 
-  async function drivePermit(fileId) {
-    /* make file publicly readable so <img> tags can load it */
-    await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '/permissions', {
-      method: 'POST', headers: json(),
-      body: JSON.stringify({ role: 'reader', type: 'anyone' })
-    });
+  /* Photos stay private (2026-11-12). Earlier versions shared every upload "anyone with the
+     link" so <img> tags could load it; the app now reads pictures with the user's token instead.
+     This removes that public link from a file; a 404 just means it was never shared. */
+  async function driveUnshare(fileId) {
+    try {
+      await fetch(DRIVE + '/' + encodeURIComponent(fileId) + '/permissions/anyoneWithLink', {
+        method: 'DELETE', headers: auth()
+      });
+    } catch (e) {}
+  }
+
+  /* Drive file id out of a stored "…uc?export=view&id=<id>" link. */
+  function _driveIdFromUrl(url) {
+    var m = /[?&]id=([^&]+)/.exec(String(url || ''));
+    return m ? decodeURIComponent(m[1]) : '';
   }
 
   /* ── folder / spreadsheet bootstrap ────────────────────────── */
@@ -385,7 +394,6 @@ var GDriveDB = (function () {
         method: 'POST', headers: { 'Authorization': 'Bearer ' + _token }, body: form
       });
       var f = await r.json();
-      await drivePermit(f.id);
       var url = 'https://drive.google.com/uc?export=view&id=' + f.id;
 
       /* write cover URL into Boxes tab */
@@ -400,10 +408,35 @@ var GDriveDB = (function () {
       return { success: false, error: 'Box not found' };
     },
 
+    /** Once per spreadsheet: remove the public link from every photo an earlier version shared. */
+    async makePhotosPrivate() {
+      var flag = 'gdrive_photos_private_' + _sheetId;
+      if (!_sheetId || localStorage.getItem(flag)) return { success: true, files: 0 };
+      localStorage.setItem(flag, '1');
+      try {
+        var ids = {};
+        (await sheetGet('Photos!A2:G2000')).forEach(function (r) { if (r[5]) ids[r[5]] = 1; });
+        (await sheetGet('Boxes!A2:F2000')).forEach(function (r) {
+          var id = _driveIdFromUrl(r[4]); if (id) ids[id] = 1;
+        });
+        var list = Object.keys(ids);
+        for (var i = 0; i < list.length; i++) await driveUnshare(list[i]);
+        return { success: true, files: list.length };
+      } catch (e) {
+        localStorage.removeItem(flag);
+        return { success: false, error: e.message };
+      }
+    },
+
     async getBoxImages(params) {
       var rows = await sheetGet('Boxes!A2:F2000');
       var images = {};
-      rows.forEach(function (r) { if (r[0] && r[4]) images[r[0]] = r[4]; });
+      await Promise.all(rows.map(async function (r) {
+        if (!r[0] || !r[4]) return;
+        var id = _driveIdFromUrl(r[4]);
+        images[r[0]] = (id && await _photoBlobUrl(id)) || r[4];
+      }));
+      this.makePhotosPrivate().catch(function () {});
       return { images: images };
     },
 
@@ -511,7 +544,6 @@ var GDriveDB = (function () {
         method: 'POST', headers: { 'Authorization': 'Bearer ' + _token }, body: form
       });
       var f = await r.json();
-      await drivePermit(f.id);
       var url = 'https://drive.google.com/uc?export=view&id=' + f.id;
 
       var photoId = _uid('ph');
