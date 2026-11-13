@@ -261,7 +261,7 @@ var GDriveDB = (function () {
     /* ── INIT ──────────────────────────────────────────────────── */
 
     /**
-     * Called after the user authorises Drive scopes.
+     * Called after the user authorizes Drive scopes.
      * Finds or creates the Drive folder + spreadsheet.
      */
     async init(accessToken, email) {
@@ -806,7 +806,7 @@ var GDriveDB = (function () {
         var mime = params.mimeType || 'image/jpeg';
         // Use Gemini 1.5 Flash (free, fast) with the user's OAuth token
         // Key is server-side only — call the Vercel proxy instead of Gemini directly
-        var GEMINI_PROXY = 'https://garage-organizer-voice.vercel.app/api/gemini';
+        var GEMINI_PROXY = 'https://garage.selectitpro.com/api/gemini';
         var r = await fetch(GEMINI_PROXY, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ image: params.image, mimeType: mime })
@@ -1227,7 +1227,7 @@ var OneDriveDB = (function () {
     analyzePhoto: async function (params) {
       try {
         var mime = params.mimeType || 'image/jpeg';
-        var GEMINI_PROXY = 'https://garage-organizer-voice.vercel.app/api/gemini';
+        var GEMINI_PROXY = 'https://garage.selectitpro.com/api/gemini';
         var r = await fetch(GEMINI_PROXY, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ image: params.image, mimeType: mime })
